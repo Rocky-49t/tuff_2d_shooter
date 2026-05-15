@@ -1,7 +1,7 @@
 {
   "name": "tactical-2d-shooter-vertical-slice",
   "version": "0.1.0",
-  "description": "Singleplayer-first top-down tactical shooter with Phaser, Express, and Socket.IO-ready architecture.",
+  "description": "Server-authoritative top-down tactical shooter with Phaser, Express, and Socket.IO multiplayer rooms.",
   "type": "module",
   "private": true,
   "scripts": {
