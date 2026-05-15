@@ -1,0 +1,16 @@
+{
+  "name": "tactical-2d-shooter-vertical-slice",
+  "version": "0.1.0",
+  "description": "Singleplayer-first top-down tactical shooter with Phaser, Express, and Socket.IO-ready architecture.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {}
+}
