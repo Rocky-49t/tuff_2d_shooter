@@ -15,7 +15,13 @@ const MAX_PLAYERS = 5;
 const CHAT_LIMIT = 50;
 const CHAT_COOLDOWN_MS = 600;
 const ROOM_IDLE_MS = 1000 * 60 * 45;
-const VALID_MODES = new Set([MULTIPLAYER_MODES.pvp, MULTIPLAYER_MODES.pve]);
+const VALID_MODES = new Set([
+  MULTIPLAYER_MODES.pvp,
+  MULTIPLAYER_MODES.pve,
+  MULTIPLAYER_MODES.botDm,
+  MULTIPLAYER_MODES.wave,
+  MULTIPLAYER_MODES.capture
+]);
 const VALID_MAPS = new Set(MAPS.map((map) => map.id));
 const VALID_LOADOUTS = new Set(LOADOUTS.map((loadout) => loadout.id));
 const DEFAULT_SETTINGS = {
@@ -26,7 +32,9 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_PROFILE = {
   username: 'Operator',
   color: '#6fc6ff',
-  loadoutId: LOADOUTS[0].id
+  loadoutId: LOADOUTS[0].id,
+  avatarUrl: '',
+  captureTeam: 'auto'
 };
 
 export function createRoomManager({ now = () => Date.now(), codeGenerator = createRoomCode } = {}) {
@@ -220,6 +228,8 @@ export function createRoomManager({ now = () => Date.now(), codeGenerator = crea
         username: player.username,
         color: player.color,
         loadoutId: player.loadoutId,
+        avatarUrl: player.avatarUrl || '',
+        captureTeam: player.captureTeam || 'auto',
         isHost: player.id === room.hostId
       })),
       chat: room.chat.slice(-CHAT_LIMIT),
@@ -269,7 +279,9 @@ export function sanitizeProfile(profile = {}) {
   return {
     username: sanitizeUsername(profile.username),
     color: sanitizeColor(profile.color),
-    loadoutId: VALID_LOADOUTS.has(profile.loadoutId) ? profile.loadoutId : DEFAULT_PROFILE.loadoutId
+    loadoutId: VALID_LOADOUTS.has(profile.loadoutId) ? profile.loadoutId : DEFAULT_PROFILE.loadoutId,
+    avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
+    captureTeam: sanitizeCaptureTeam(profile.captureTeam)
   };
 }
 
@@ -333,6 +345,23 @@ function sanitizeUsername(value) {
 
 function sanitizeColor(value) {
   return /^#[0-9a-fA-F]{6}$/.test(value || '') ? value : DEFAULT_PROFILE.color;
+}
+
+const MAX_AVATAR_CHARS = 120_000;
+
+function sanitizeAvatarUrl(value) {
+  const s = String(value || '').trim();
+  if (!s.startsWith('data:image/')) return '';
+  if (s.includes('data:image/svg')) return '';
+  if (s.length > MAX_AVATAR_CHARS) return '';
+  return s;
+}
+
+const CAPTURE_TEAMS = new Set(['auto', 'alpha', 'bravo']);
+
+function sanitizeCaptureTeam(value) {
+  const t = String(value || '').toLowerCase();
+  return CAPTURE_TEAMS.has(t) ? t : 'auto';
 }
 
 function sanitizeText(value, limit) {

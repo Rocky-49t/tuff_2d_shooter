@@ -159,7 +159,7 @@ h2 {
 
 .profile-row {
   display: grid;
-  grid-template-columns: minmax(160px, 240px) 92px 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -360,6 +360,7 @@ h2 {
 
 .label,
 .ammo-readout span,
+.kit-readout span,
 .objective-readout span {
   display: block;
   color: var(--muted);

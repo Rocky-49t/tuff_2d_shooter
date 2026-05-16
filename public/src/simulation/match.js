@@ -20,7 +20,10 @@ export const MATCH_PHASES = {
 
 export const MULTIPLAYER_MODES = {
   pvp: 'multiplayer_pvp',
-  pve: 'multiplayer_pve'
+  pve: 'multiplayer_pve',
+  botDm: 'multiplayer_bot_dm',
+  wave: 'multiplayer_wave',
+  capture: 'multiplayer_capture'
 };
 
 const DEFAULT_PLAYER_COLOR = '#6fc6ff';
@@ -30,8 +33,15 @@ const PICKUP_RESPAWN = {
   medkit: 18,
   ammo: 14,
   armor: 22,
-  adrenaline: 20
+  adrenaline: 20,
+  grenade: 55,
+  bandage: 48
 };
+
+const CAPTURE_TIME = 3.1;
+const GRENADE_THROW_SPEED = 410;
+const GRENADE_BLAST_RADIUS = 118;
+const GRENADE_MAX_DAMAGE = 56;
 
 const ARCHETYPES = {
   rifle: { health: 100, armor: 15, speed: 182, weapon: 'mk18', aggression: 0.85, preferredRange: 420 },
@@ -54,6 +64,8 @@ export function createMatch({
   loadoutId = LOADOUTS[0].id,
   playerName = 'Operator',
   playerColor = DEFAULT_PLAYER_COLOR,
+  playerAvatarUrl = '',
+  captureTeam = null,
   seed = `${mode}:${mapId}:${loadoutId}`
 } = {}) {
   const state = createBaseMatch({ mode, mapId, seed });
@@ -64,14 +76,27 @@ export function createMatch({
     id: PLAYER_ID,
     username: playerName,
     color: playerColor,
+    avatarUrl: playerAvatarUrl,
     loadoutId,
-    respawns: isPvpMode(mode)
+    respawns: isBotDmMode(mode) || isWaveMode(mode) || isCaptureMode(mode),
+    captureTeam: isCaptureMode(mode) ? captureTeam : undefined
   });
 
-  if (isPveMode(mode)) addPveEnemies(state);
-  if (mode === 'pvp_deathmatch') addDeathmatchBots(state);
+  if (mode === 'pve_elimination' || mode === MULTIPLAYER_MODES.pve) addPveEnemies(state);
+  if (isBotDmMode(mode)) addDeathmatchBots(state);
+  if (isWaveMode(mode) && !state.multiplayer) primeWaveMode(state);
+  if (isCaptureMode(mode) && !state.multiplayer) addCaptureBots(state);
 
-  pushFeed(state, isPvpMode(mode) ? 'Deathmatch live. Highest score wins.' : 'Eliminate all hostiles.');
+  if (isCaptureMode(mode)) {
+    pushFeed(state, 'Capture zones and bank score for your team.');
+    state.objective.label = 'Team score';
+    state.objective.remaining = state.objective.duration;
+  } else if (isWaveMode(mode)) {
+    pushFeed(state, 'Survive escalating waves. Highest kills win when time expires.');
+    state.objective.label = 'Wave';
+  } else {
+    pushFeed(state, isBotDmMode(mode) ? 'Deathmatch live. Highest score wins.' : 'Eliminate all hostiles.');
+  }
   return state;
 }
 
@@ -85,9 +110,30 @@ export function createRoomMatch({
   const state = createBaseMatch({ mode, mapId, seed, timeLimit });
   state.multiplayer = true;
   state.inputs = {};
-  for (const player of players) addPlayer(state, player);
-  if (isPveMode(mode)) addPveEnemies(state);
-  pushFeed(state, isPveMode(mode) ? 'Co-op elimination live.' : 'Human deathmatch live.');
+  let idx = 0;
+  const captureTeams = buildCaptureTeamOrder(mode, players);
+  for (const player of players) {
+    const captureTeam = captureTeams[idx];
+    idx += 1;
+    addPlayer(state, {
+      ...player,
+      respawns: mode !== MULTIPLAYER_MODES.pve,
+      captureTeam
+    });
+  }
+  if (mode === MULTIPLAYER_MODES.pve) addPveEnemies(state);
+  else if (mode === MULTIPLAYER_MODES.botDm) addDeathmatchBots(state);
+  else if (mode === MULTIPLAYER_MODES.wave) primeWaveMode(state);
+  if (mode === MULTIPLAYER_MODES.capture) {
+    pushFeed(state, 'Territory Control — hold zones to score.');
+    state.objective.label = 'Team score';
+    state.objective.remaining = state.objective.duration;
+  } else if (mode === MULTIPLAYER_MODES.wave) {
+    pushFeed(state, 'Co-op survival waves. Rack up kills.');
+    state.objective.label = 'Wave';
+  } else {
+    pushFeed(state, isPveMode(mode) ? 'Co-op elimination live.' : isBotDmMode(mode) ? 'Bot deathmatch live.' : 'Human deathmatch live.');
+  }
   return state;
 }
 
@@ -95,14 +141,17 @@ export function addPlayer(state, {
   id,
   username = 'Operator',
   color = DEFAULT_PLAYER_COLOR,
+  avatarUrl = '',
   loadoutId = LOADOUTS[0].id,
-  respawns = isPvpMode(state.mode)
+  respawns = isBotDmMode(state.mode) || isWaveMode(state.mode) || isCaptureMode(state.mode),
+  captureTeam: preferredCapture = null
 } = {}) {
   if (!id) throw new Error('addPlayer requires an id');
   const existing = state.entities.find((entity) => entity.id === id);
   if (existing) {
     existing.name = username;
     existing.color = color;
+    if (avatarUrl) existing.avatarUrl = avatarUrl;
     state.score[id] ||= { kills: 0, deaths: 0, name: username, team: existing.team, color };
     state.score[id].name = username;
     state.score[id].color = color;
@@ -110,12 +159,28 @@ export function addPlayer(state, {
   }
 
   const loadout = getLoadout(loadoutId);
-  const spawn = chooseSpawn(state, state.map.playerSpawns, 24);
-  const team = isPveMode(state.mode) ? 'blue' : id;
+  let spawnZones = state.map.playerSpawns;
+  let team;
+  if (isCaptureMode(state.mode)) {
+    if (preferredCapture === 'bravo') team = 'bravo';
+    else if (preferredCapture === 'alpha') team = 'alpha';
+    else {
+      const a = state.entities.filter((e) => e.team === 'alpha' && e.isPlayer).length;
+      const b = state.entities.filter((e) => e.team === 'bravo' && e.isPlayer).length;
+      team = a <= b ? 'alpha' : 'bravo';
+    }
+    spawnZones = team === 'bravo' ? state.map.teamSpawns.bravo : state.map.teamSpawns.alpha;
+  } else if (isPveMode(state.mode)) {
+    team = 'blue';
+  } else {
+    team = id;
+  }
+  const spawn = chooseSpawn(state, spawnZones, 24);
   const entity = createEntity(state, {
     id,
     name: username,
     color,
+    avatarUrl,
     team,
     faction: 'player',
     x: spawn.x,
@@ -125,6 +190,7 @@ export function addPlayer(state, {
     armor: loadout.armor,
     speed: 226 + loadout.speedBonus,
     weapons: loadout.weapons,
+    loadoutId,
     respawns
   });
   entity.loadoutId = loadout.id;
@@ -162,6 +228,8 @@ export function makeInput(overrides = {}) {
     sprint: false,
     interact: false,
     pause: false,
+    useGrenade: false,
+    useBandage: false,
     sentAt: 0,
     ...overrides
   };
@@ -201,6 +269,7 @@ export function serializeSnapshot(state, { playerId = state.playerId, events = s
       id: entity.id,
       name: entity.name,
       color: entity.color,
+      avatarUrl: entity.avatarUrl || '',
       team: entity.team,
       faction: entity.faction,
       isPlayer: entity.isPlayer,
@@ -218,6 +287,8 @@ export function serializeSnapshot(state, { playerId = state.playerId, events = s
       speed: entity.speed,
       stamina: entity.stamina,
       maxStamina: entity.maxStamina,
+      grenades: entity.grenades,
+      bandages: entity.bandages,
       activeWeaponIndex: entity.activeWeaponIndex,
       weapons: [...entity.weapons],
       ammo: clone(entity.ammo),
@@ -225,7 +296,10 @@ export function serializeSnapshot(state, { playerId = state.playerId, events = s
       invulnerableUntil: entity.invulnerableUntil
     })),
     bullets: state.bullets.map((bullet) => ({ ...bullet })),
-    pickups: state.pickups.map((pickup) => ({ ...pickup }))
+    thrownGrenades: state.thrownGrenades.map((g) => ({ ...g })),
+    pickups: state.pickups.map((pickup) => ({ ...pickup })),
+    wave: state.wave ? { ...state.wave } : null,
+    capture: state.capture ? clone(state.capture) : null
   };
 }
 
@@ -238,7 +312,9 @@ export function getPlayer(state, playerId = state.playerId || PLAYER_ID) {
 }
 
 export function getActiveWeapon(entity) {
+  if (entity?.zombie) return WEAPONS.zombie_claw;
   const weaponId = entity?.weapons?.[entity.activeWeaponIndex] || entity?.weapons?.[0];
+  if (!weaponId) return WEAPONS.mk18;
   return WEAPONS[weaponId] || WEAPONS.mk18;
 }
 
@@ -247,13 +323,49 @@ export function getActiveAmmo(entity) {
   return entity?.ammo?.[weapon.id] || { mag: 0, reserve: 0, reloadRemaining: 0, cooldown: 0 };
 }
 
+function enrichMatchMap(map) {
+  const m = clone(map);
+  if (!m.teamSpawns) {
+    const ps = [...(m.playerSpawns || [])].sort((a, b) => a.x - b.x);
+    if (ps.length >= 2) {
+      m.teamSpawns = { alpha: [ps[0]], bravo: [ps[1]] };
+    } else if (ps.length === 1) {
+      const p = ps[0];
+      const rad = Math.max(100, p.radius || 100);
+      m.teamSpawns = {
+        alpha: [{ x: clamp(p.x - Math.min(380, m.width * 0.22), rad + 40, m.width * 0.42), y: p.y, radius: rad }],
+        bravo: [{ x: clamp(p.x + Math.min(380, m.width * 0.22), m.width * 0.58, m.width - rad - 40), y: p.y, radius: rad }]
+      };
+    } else {
+      m.teamSpawns = {
+        alpha: [{ x: m.width * 0.22, y: m.height * 0.5, radius: 140 }],
+        bravo: [{ x: m.width * 0.78, y: m.height * 0.5, radius: 140 }]
+      };
+    }
+  }
+  return m;
+}
+
+function randomPickupPosition(state) {
+  for (let k = 0; k < 56; k += 1) {
+    const spot = findOpenPickupSpot(state);
+    if (spot) return spot;
+  }
+  return null;
+}
+
 function createBaseMatch({ mode, mapId, seed, timeLimit = null }) {
-  const map = clone(getMap(mapId));
-  const duration = timeLimit === null || timeLimit === 'none'
-    ? null
-    : Number.isFinite(Number(timeLimit)) ? Math.max(15, Number(timeLimit)) : map.matchDuration;
+  const map = enrichMatchMap(getMap(mapId));
+  const fallbackDuration = Math.max(60, Number(map.matchDuration) || 180);
+  let duration =
+    timeLimit === null || timeLimit === 'none'
+      ? null
+      : Number.isFinite(Number(timeLimit))
+        ? Math.max(15, Number(timeLimit))
+        : fallbackDuration;
+  if (duration !== null && !Number.isFinite(duration)) duration = fallbackDuration;
   const state = {
-    version: 2,
+    version: 3,
     mode,
     map,
     loadout: null,
@@ -268,26 +380,44 @@ function createBaseMatch({ mode, mapId, seed, timeLimit = null }) {
     playerIds: [],
     entities: [],
     bullets: [],
+    thrownGrenades: [],
     pickups: [],
     events: [],
     feed: [],
     inputs: {},
+    wave: null,
+    capture: null,
+    rarePickupIn: 0,
     objective: {
-      label: isPvpMode(mode) ? 'Time' : 'Hostiles',
-      remaining: isPvpMode(mode) ? duration : map.pveEnemies.length,
+      label: isPvpMode(mode) || isBotDmMode(mode) ? 'Time' : 'Hostiles',
+      remaining: isPvpMode(mode) || isBotDmMode(mode) ? duration : map.pveEnemies?.length || 0,
       duration,
       winner: null
     },
     score: {}
   };
-  state.pickups = map.pickups.map((pickup) => ({
-    id: `pickup-${state.nextPickupId++}`,
-    type: pickup.type,
-    x: pickup.x,
-    y: pickup.y,
-    active: true,
-    respawnAt: 0
-  }));
+  state.rarePickupIn = 10 + random(state) * 20;
+  state.pickups = map.pickups.map((pickup) => {
+    const pt = randomPickupPosition(state) || { x: map.width / 2, y: map.height / 2 };
+    return {
+      id: `pickup-${state.nextPickupId++}`,
+      type: pickup.type,
+      x: pt.x,
+      y: pt.y,
+      active: true,
+      respawnAt: 0
+    };
+  });
+  if (isWaveMode(mode)) {
+    state.wave = { completedWaves: 0, nextSpawn: state.time + 3.5 };
+    state.objective.label = 'Wave';
+    state.objective.remaining = 1;
+  }
+  if (isCaptureMode(mode)) {
+    state.capture = initCaptureState(map);
+    state.objective.label = 'Team score';
+    state.objective.remaining = duration;
+  }
   return state;
 }
 
@@ -318,7 +448,12 @@ function stepMatch(state, dt) {
   }
 
   updateBullets(state, safeDt);
+  updateThrownGrenades(state, safeDt);
   updatePickups(state);
+  if (isWaveMode(state.mode)) updateWaveMode(state, safeDt);
+  if (isCaptureMode(state.mode)) updateCaptureMode(state, safeDt);
+  updateRarePickupSpawns(state, safeDt);
+  updateZombieMelee(state, safeDt);
   updateObjective(state);
   return state;
 }
@@ -382,11 +517,16 @@ function addDeathmatchBots(state) {
 }
 
 function createEntity(state, options) {
-  const weapons = [...options.weapons];
+  const weapons = [...(options.weapons || [])];
+  const isZombie = Boolean(options.zombie);
+  const loadout = options.loadoutId ? getLoadout(options.loadoutId) : null;
+  const kitGrenades = loadout?.grenades ?? 2;
+  const kitBandages = loadout?.bandages ?? 2;
   const entity = {
     id: options.id || `entity-${state.nextEntityId++}`,
     name: options.name || 'Combatant',
     color: options.color || DEFAULT_PLAYER_COLOR,
+    avatarUrl: options.avatarUrl || '',
     team: options.team || 'hostile',
     faction: options.faction || 'hostile',
     x: options.x,
@@ -404,15 +544,25 @@ function createEntity(state, options) {
     maxStamina: 100,
     activeWeaponIndex: 0,
     weapons,
+    grenades: options.grenades ?? kitGrenades,
+    bandages: options.bandages ?? kitBandages,
     ammo: {},
     isPlayer: Boolean(options.isPlayer),
     ai: options.ai || null,
+    zombie: isZombie,
     dead: false,
     respawns: Boolean(options.respawns),
     respawnAt: 0,
     invulnerableUntil: state.time + (options.isPlayer ? 1.2 : 0.5),
     lastDamageAt: -10
   };
+  if (isZombie) {
+    entity.weapons = [];
+    entity.meleeDamage = options.meleeDamage ?? 22;
+    entity.meleeRange = options.meleeRange ?? 46;
+    entity.meleeCooldown = 0;
+    return entity;
+  }
   for (const weaponId of weapons) {
     const weapon = WEAPONS[weaponId];
     entity.ammo[weaponId] = {
@@ -426,7 +576,7 @@ function createEntity(state, options) {
 }
 
 function applyCommand(state, entity, input, dt) {
-  if (Number.isInteger(input.swap)) {
+  if (Number.isInteger(input.swap) && entity.weapons.length > 0) {
     entity.activeWeaponIndex = clamp(input.swap, 0, entity.weapons.length - 1);
   }
 
@@ -441,6 +591,28 @@ function applyCommand(state, entity, input, dt) {
   moveEntity(state, entity, move.x * speed * dt, move.y * speed * dt);
 
   if (input.reload) startReload(entity);
+  if (input.useBandage && entity.bandages > 0 && entity.health < entity.maxHealth - 0.5) {
+    entity.bandages -= 1;
+    entity.health = Math.min(entity.maxHealth, entity.health + 38);
+    state.events.push({ type: 'bandage', entityId: entity.id, x: entity.x, y: entity.y });
+  }
+  if (input.useGrenade && entity.grenades > 0) {
+    entity.grenades -= 1;
+    const ang = entity.angle;
+    const gx = entity.x + Math.cos(ang) * (entity.radius + 10);
+    const gy = entity.y + Math.sin(ang) * (entity.radius + 10);
+    state.thrownGrenades.push({
+      id: `t-grenade-${state.nextEntityId++}`,
+      x: gx,
+      y: gy,
+      vx: Math.cos(ang) * GRENADE_THROW_SPEED,
+      vy: Math.sin(ang) * GRENADE_THROW_SPEED,
+      fuse: 1.38,
+      ownerId: entity.id,
+      team: entity.team
+    });
+    state.events.push({ type: 'throw', entityId: entity.id, x: gx, y: gy, angle: ang });
+  }
   if (input.fire) fireWeapon(state, entity);
 }
 
@@ -493,6 +665,7 @@ function updateReloads(entity, dt) {
 
 function fireWeapon(state, entity) {
   const weapon = getActiveWeapon(entity);
+  if (!weapon.projectileSpeed || weapon.range <= 0) return;
   const ammo = entity.ammo[weapon.id];
   if (!ammo || ammo.cooldown > 0 || ammo.reloadRemaining > 0) return;
   if (ammo.mag <= 0) {
@@ -564,7 +737,7 @@ function findBulletHit(state, bullet, old, next) {
   let closestDistance = Infinity;
   for (const entity of state.entities) {
     if (entity.dead || entity.id === bullet.ownerId) continue;
-    if (isPveMode(state.mode) && entity.team === bullet.team) continue;
+    if (shouldSkipFriendlyFire(state, entity.team, bullet.team)) continue;
     const missDistance = distancePointToSegment(entity, old, next);
     if (missDistance > entity.radius + bullet.radius) continue;
     const alongDistance = distance(old, entity);
@@ -627,8 +800,18 @@ function killEntity(state, target, killerId) {
 
 function updateRespawn(state, entity) {
   if (!entity.dead || !entity.respawns || state.time < entity.respawnAt) return;
-  const spawnSet = entity.isPlayer ? state.map.playerSpawns : state.map.botSpawns;
-  const spawn = chooseSpawn(state, spawnSet, entity.radius);
+  let spawnSet = state.map.botSpawns;
+  if (entity.isPlayer) {
+    spawnSet = state.map.playerSpawns;
+    if (isCaptureMode(state.mode)) {
+      spawnSet = entity.team === 'bravo' ? state.map.teamSpawns.bravo : state.map.teamSpawns.alpha;
+    }
+  } else if (isCaptureMode(state.mode) && (entity.team === 'alpha' || entity.team === 'bravo')) {
+    spawnSet = state.map.teamSpawns?.[entity.team] || state.map.botSpawns;
+  }
+  const spawn = entity.isPlayer
+    ? chooseSpawn(state, spawnSet, entity.radius)
+    : chooseSpawnAvoidingPlayers(state, spawnSet, entity.radius, 420);
   entity.x = spawn.x;
   entity.y = spawn.y;
   entity.health = entity.maxHealth;
@@ -646,6 +829,22 @@ function updateRespawn(state, entity) {
 }
 
 function buildAICommand(state, entity) {
+  if (entity.zombie) {
+    const target = chooseTarget(state, entity);
+    if (!target) return makeInput();
+    const toTarget = { x: target.x - entity.x, y: target.y - entity.y };
+    const forward = normalize(toTarget.x, toTarget.y);
+    const strafe = { x: -forward.y * (entity.ai?.strafe || 1), y: forward.x * (entity.ai?.strafe || 1) };
+    return makeInput({
+      moveX: forward.x * 0.92 + strafe.x * 0.25,
+      moveY: forward.y * 0.92 + strafe.y * 0.25,
+      aimX: target.x,
+      aimY: target.y,
+      fire: false,
+      reload: false,
+      sprint: false
+    });
+  }
   const target = chooseTarget(state, entity);
   if (!target) return makeInput();
   const toTarget = { x: target.x - entity.x, y: target.y - entity.y };
@@ -655,8 +854,19 @@ function buildAICommand(state, entity) {
   const forward = normalize(toTarget.x, toTarget.y);
   const strafe = { x: -forward.y * entity.ai.strafe, y: forward.x * entity.ai.strafe };
   const pressure = range > preferred ? 1 : range < preferred * 0.55 ? -0.6 : 0;
-  const moveX = forward.x * pressure + strafe.x * 0.55;
-  const moveY = forward.y * pressure + strafe.y * 0.55;
+  let moveX = forward.x * pressure + strafe.x * 0.55;
+  let moveY = forward.y * pressure + strafe.y * 0.55;
+  if (isCaptureMode(state.mode) && entity.faction === 'bot' && state.capture) {
+    const capT = pickCaptureObjective(state, entity);
+    if (capT && random(state) < 0.36) {
+      const to = normalize(capT.x - entity.x, capT.y - entity.y);
+      moveX = moveX * 0.48 + to.x * 0.52;
+      moveY = moveY * 0.48 + to.y * 0.52;
+      const blended = normalize(moveX, moveY);
+      moveX = blended.x;
+      moveY = blended.y;
+    }
+  }
   const ammo = getActiveAmmo(entity);
   const weapon = getActiveWeapon(entity);
   const shouldReload = ammo.mag <= Math.max(2, weapon.magazineSize * 0.18);
@@ -681,7 +891,8 @@ function buildAICommand(state, entity) {
 function chooseTarget(state, entity) {
   const candidates = state.entities.filter((candidate) => {
     if (candidate.dead || candidate.id === entity.id) return false;
-    if (isPveMode(state.mode)) return candidate.team !== entity.team;
+    if (isCaptureMode(state.mode)) return candidate.team !== entity.team;
+    if (isPveMode(state.mode) || isWaveMode(state.mode)) return candidate.team !== entity.team;
     return true;
   });
   let best = null;
@@ -722,6 +933,12 @@ function updatePickups(state) {
         player.stamina = player.maxStamina;
         player.invulnerableUntil = Math.max(player.invulnerableUntil, state.time + 0.65);
         pushFeed(state, `${player.name} used adrenaline.`);
+      } else if (pickup.type === 'grenade') {
+        player.grenades = Math.min(5, player.grenades + 1);
+        pushFeed(state, `${player.name} picked up a grenade.`);
+      } else if (pickup.type === 'bandage') {
+        player.bandages = Math.min(6, player.bandages + 1);
+        pushFeed(state, `${player.name} picked up bandages.`);
       }
       pickup.active = false;
       pickup.respawnAt = state.time + (PICKUP_RESPAWN[pickup.type] || 16);
@@ -732,6 +949,11 @@ function updatePickups(state) {
 
 function updatePickupRespawn(state, pickup) {
   if (!pickup.active && state.time >= pickup.respawnAt) {
+    const pt = randomPickupPosition(state);
+    if (pt) {
+      pickup.x = pt.x;
+      pickup.y = pt.y;
+    }
     pickup.active = true;
     state.events.push({ type: 'pickupRespawn', pickupType: pickup.type, x: pickup.x, y: pickup.y });
   }
@@ -746,6 +968,50 @@ function applyHazards(state, entity, dt) {
 }
 
 function updateObjective(state) {
+  if (isCaptureMode(state.mode)) {
+    if (state.objective.duration === null) {
+      state.objective.remaining = null;
+      return;
+    }
+    state.objective.remaining = Math.max(0, state.objective.duration - state.time);
+    if (state.time < state.objective.duration) return;
+    const cap = state.capture;
+    const a = cap?.teamScore?.alpha || 0;
+    const b = cap?.teamScore?.bravo || 0;
+    let winningTeam = null;
+    if (a > b) winningTeam = 'alpha';
+    else if (b > a) winningTeam = 'bravo';
+    const local = getPlayer(state, state.playerId);
+    const playerWon = local && winningTeam && local.team === winningTeam;
+    endMatch(
+      state,
+      winningTeam ? `${winningTeam.toUpperCase()} wins (${Math.round(Math.max(a, b))} pts).` : 'Draw — equal score.',
+      playerWon ? state.playerId : null
+    );
+    return;
+  }
+
+  if (isWaveMode(state.mode)) {
+    state.objective.remaining = Math.max(1, state.wave?.completedWaves || 1);
+    if (state.playerIds.length > 0) {
+      const livingPlayers = state.playerIds
+        .map((playerId) => getPlayer(state, playerId))
+        .filter((player) => player && !player.dead);
+      if (livingPlayers.length === 0) {
+        endMatch(state, 'All operators down.', null);
+        return;
+      }
+    }
+    if (state.objective.duration === null) return;
+    if (state.time < state.objective.duration) return;
+    const entries = state.playerIds
+      .map((id) => [id, state.score[id]?.kills || 0])
+      .sort((x, y) => y[1] - x[1]);
+    const winId = entries[0]?.[0] || state.playerIds[0] || null;
+    endMatch(state, `Time elapsed. Most eliminations: ${state.score[winId]?.name || 'Nobody'}.`, winId);
+    return;
+  }
+
   if (isPveMode(state.mode)) {
     const remaining = state.entities.filter((entity) => entity.team === 'hostile' && !entity.dead).length;
     state.objective.remaining = remaining;
@@ -756,7 +1022,7 @@ function updateObjective(state) {
     const livingPlayers = state.playerIds
       .map((playerId) => getPlayer(state, playerId))
       .filter((player) => player && !player.dead);
-    if (state.playerIds.length > 0 && livingPlayers.length === 0) endMatch(state, 'Operators down. Mission failed.', 'hostile');
+    if (state.playerIds.length > 0 && livingPlayers.length === 0) endMatch(state, 'Operators down. Mission failed.', null);
     return;
   }
 
@@ -805,6 +1071,58 @@ function chooseSpawn(state, spawns, radius) {
   return best;
 }
 
+function chooseSpawnAvoidingPlayers(state, spawns, radius, minFromPlayer = 400) {
+  const players = state.entities.filter((e) => e.isPlayer && !e.dead);
+  let best = null;
+  let bestScore = -Infinity;
+  for (let attempt = 0; attempt < 52; attempt += 1) {
+    const candidate = chooseSpawn(state, spawns, radius);
+    let minD = Infinity;
+    for (const p of players) {
+      minD = Math.min(minD, distance(candidate, p));
+    }
+    if (minD < minFromPlayer) continue;
+    const score = minD + random(state) * 50;
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best || chooseSpawn(state, spawns, radius);
+}
+
+function pickCaptureObjective(state, entity) {
+  const pts = state.capture?.points;
+  if (!pts?.length) return null;
+  const uncap = pts.filter((p) => p.owner !== entity.team);
+  const pool = uncap.length ? uncap : pts;
+  let best = null;
+  let bestD = Infinity;
+  for (const cp of pool) {
+    const d = distance(entity, { x: cp.x, y: cp.y });
+    if (d < bestD) {
+      bestD = d;
+      best = cp;
+    }
+  }
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function updateZombieMelee(state, dt) {
+  for (const entity of state.entities) {
+    if (!entity.zombie || entity.dead) continue;
+    entity.meleeCooldown = Math.max(0, (entity.meleeCooldown || 0) - dt);
+    const target = chooseTarget(state, entity);
+    if (!target || target.dead) continue;
+    const reach = entity.meleeRange + target.radius * 0.45;
+    if (distance(entity, target) > reach) continue;
+    if (entity.meleeCooldown > 0) continue;
+    entity.meleeCooldown = 0.78;
+    applyDirectDamage(state, target, entity.meleeDamage, entity.id, 'zombie_claw');
+    state.events.push({ type: 'melee', x: entity.x, y: entity.y, entityId: entity.id });
+  }
+}
+
 function sanitizeInput(state, input = {}) {
   const seq = Number.isFinite(Number(input.seq)) ? Math.max(0, Math.floor(Number(input.seq))) : 0;
   return makeInput({
@@ -819,6 +1137,8 @@ function sanitizeInput(state, input = {}) {
     sprint: Boolean(input.sprint),
     interact: Boolean(input.interact),
     pause: Boolean(input.pause),
+    useGrenade: Boolean(input.useGrenade),
+    useBandage: Boolean(input.useBandage),
     sentAt: state.time
   });
 }
@@ -845,12 +1165,294 @@ function looksLikeInput(value) {
   return Object.hasOwn(value, 'moveX') || Object.hasOwn(value, 'fire') || Object.hasOwn(value, 'aimX');
 }
 
+function buildCaptureTeamOrder(mode, players = []) {
+  if (!isCaptureMode(mode)) return players.map(() => undefined);
+  let alpha = 0;
+  let bravo = 0;
+  return players.map((p) => {
+    const pref = p.captureTeam === 'bravo' ? 'bravo' : p.captureTeam === 'alpha' ? 'alpha' : null;
+    let assign;
+    if (pref === 'alpha' || pref === 'bravo') {
+      assign = pref;
+    } else {
+      assign = alpha <= bravo ? 'alpha' : 'bravo';
+    }
+    if (assign === 'alpha') alpha += 1;
+    else bravo += 1;
+    return assign;
+  });
+}
+
+function primeWaveMode(state) {
+  if (!state.wave) state.wave = { completedWaves: 0, nextSpawn: state.time + 3.5 };
+}
+
+function defaultCapturePoints(map) {
+  return [
+    { id: 'cp-1', x: map.width * 0.28, y: map.height * 0.52, radius: 74 },
+    { id: 'cp-2', x: map.width * 0.72, y: map.height * 0.48, radius: 74 },
+    { id: 'cp-3', x: map.width * 0.5, y: map.height * 0.3, radius: 70 }
+  ];
+}
+
+function initCaptureState(map) {
+  const pts = map.capturePoints?.length ? map.capturePoints : defaultCapturePoints(map);
+  return {
+    points: pts.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      radius: p.radius ?? 76,
+      owner: null,
+      alpha: 0,
+      bravo: 0
+    })),
+    teamScore: { alpha: 0, bravo: 0 }
+  };
+}
+
+function spawnCaptureBot(state, team, archetypeName, salt) {
+  const archetype = ARCHETYPES[archetypeName] || ARCHETYPES.rifle;
+  const zones = state.map.teamSpawns?.[team] || state.map.botSpawns;
+  const spawn = chooseSpawn(state, zones, 26);
+  const ent = createEntity(state, {
+    name: `${team === 'alpha' ? 'Alpha' : 'Bravo'} Unit`,
+    color: team === 'alpha' ? '#5eb0e8' : '#e85d5d',
+    team,
+    faction: 'bot',
+    x: spawn.x,
+    y: spawn.y,
+    health: archetype.health,
+    armor: archetype.armor,
+    speed: archetype.speed,
+    weapons: [archetype.weapon, 'sidearm'],
+    loadoutId: 'rifleman',
+    respawns: true,
+    ai: {
+      type: archetypeName,
+      aggression: archetype.aggression * 0.9,
+      preferredRange: archetype.preferredRange,
+      thinkAt: 0,
+      strafe: salt % 2 === 0 ? 1 : -1
+    }
+  });
+  state.entities.push(ent);
+  state.score[ent.id] = { kills: 0, deaths: 0, name: ent.name, team, color: ent.color };
+}
+
+function addCaptureBots(state) {
+  if (state.multiplayer) return;
+  const archetypeKeys = ['rifle', 'rusher', 'sniper', 'support'];
+  const playersA = state.entities.filter((e) => e.team === 'alpha' && e.isPlayer).length;
+  const playersB = state.entities.filter((e) => e.team === 'bravo' && e.isPlayer).length;
+  const target = 4;
+  const needA = Math.max(0, target - playersA);
+  const needB = Math.max(0, target - playersB);
+  let idx = 0;
+  for (let i = 0; i < needA; i += 1, idx += 1) {
+    spawnCaptureBot(state, 'alpha', archetypeKeys[idx % archetypeKeys.length], idx);
+  }
+  for (let i = 0; i < needB; i += 1, idx += 1) {
+    spawnCaptureBot(state, 'bravo', archetypeKeys[idx % archetypeKeys.length], idx);
+  }
+}
+
+function updateWaveMode(state, dt) {
+  const w = state.wave;
+  if (!w) return;
+  const alive = state.entities.filter((entity) => entity.team === 'hostile' && !entity.dead).length;
+  if (alive === 0 && state.time >= w.nextSpawn) {
+    spawnWaveCluster(state);
+    w.nextSpawn = state.time + 2.4;
+  }
+}
+
+function spawnWaveCluster(state) {
+  const w = state.wave;
+  w.completedWaves += 1;
+  const wn = w.completedWaves;
+  const count = Math.min(18, Math.max(3, Math.floor(2 + wn * 1.08)));
+  const hpScale = 1 + wn * 0.12;
+  const meleeDamage = 16 + wn * 3.4;
+  for (let i = 0; i < count; i += 1) {
+    const spawn = chooseSpawn(state, state.map.botSpawns, 24);
+    const ent = createEntity(state, {
+      name: `Wave ${wn} Infected`,
+      color: '#b84a4a',
+      team: 'hostile',
+      faction: 'hostile',
+      zombie: true,
+      x: spawn.x,
+      y: spawn.y,
+      health: Math.round(92 * hpScale),
+      armor: Math.min(26, Math.round(4 + wn * 1.15)),
+      speed: 118 + Math.min(42, wn * 2.6),
+      meleeDamage,
+      meleeRange: 48,
+      weapons: [],
+      ai: {
+        type: 'zombie',
+        strafe: i % 2 === 0 ? 1 : -1,
+        thinkAt: 0
+      }
+    });
+    state.entities.push(ent);
+  }
+  pushFeed(state, `Wave ${wn} — ${count} infected.`);
+}
+
+function updateCaptureMode(state, dt) {
+  const cap = state.capture;
+  if (!cap) return;
+  for (const cp of cap.points) {
+    let aIn = false;
+    let bIn = false;
+    for (const e of state.entities) {
+      if (e.dead) continue;
+      if (e.team !== 'alpha' && e.team !== 'bravo') continue;
+      if (distance(e, { x: cp.x, y: cp.y }) < cp.radius + e.radius * 0.35) {
+        if (e.team === 'alpha') aIn = true;
+        if (e.team === 'bravo') bIn = true;
+      }
+    }
+    if (aIn && !bIn) {
+      cp.alpha += dt;
+      cp.bravo = Math.max(0, cp.bravo - dt * 0.7);
+    } else if (bIn && !aIn) {
+      cp.bravo += dt;
+      cp.alpha = Math.max(0, cp.alpha - dt * 0.7);
+    } else {
+      cp.alpha = Math.max(0, cp.alpha - dt * 0.32);
+      cp.bravo = Math.max(0, cp.bravo - dt * 0.32);
+    }
+    if (cp.alpha >= CAPTURE_TIME) {
+      if (cp.owner !== 'alpha') pushFeed(state, 'ALPHA secured a sector.');
+      cp.owner = 'alpha';
+      cp.alpha = CAPTURE_TIME;
+      cp.bravo = 0;
+    }
+    if (cp.bravo >= CAPTURE_TIME) {
+      if (cp.owner !== 'bravo') pushFeed(state, 'BRAVO secured a sector.');
+      cp.owner = 'bravo';
+      cp.bravo = CAPTURE_TIME;
+      cp.alpha = 0;
+    }
+  }
+  const ownedA = cap.points.filter((p) => p.owner === 'alpha').length;
+  const ownedB = cap.points.filter((p) => p.owner === 'bravo').length;
+  cap.teamScore.alpha += ownedA * 12 * dt;
+  cap.teamScore.bravo += ownedB * 12 * dt;
+}
+
+function updateThrownGrenades(state, dt) {
+  const kept = [];
+  for (const g of state.thrownGrenades) {
+    g.fuse -= dt;
+    const ox = g.x;
+    const oy = g.y;
+    g.x += g.vx * dt;
+    g.y += g.vy * dt;
+    const wall = state.map.obstacles.some((rect) => segmentIntersectsRect({ x: ox, y: oy }, { x: g.x, y: g.y }, rect));
+    if (wall || g.fuse <= 0) {
+      detonateGrenade(state, g);
+      continue;
+    }
+    kept.push(g);
+  }
+  state.thrownGrenades = kept;
+}
+
+function shouldSkipFriendlyFire(state, targetTeam, sourceTeam) {
+  if (isCaptureMode(state.mode)) return targetTeam === sourceTeam;
+  if (isPveMode(state.mode) || isWaveMode(state.mode)) return targetTeam === sourceTeam;
+  return false;
+}
+
+function applyDirectDamage(state, target, damage, killerId, weaponId = 'grenade') {
+  if (state.time < target.invulnerableUntil) {
+    state.events.push({ type: 'deflect', x: target.x, y: target.y });
+    return;
+  }
+  let dmg = damage;
+  if (target.armor > 0) {
+    const absorbed = Math.min(target.armor, dmg * 0.45);
+    target.armor -= absorbed;
+    dmg -= absorbed * 0.7;
+  }
+  target.health = Math.max(0, target.health - dmg);
+  target.lastDamageAt = state.time;
+  state.events.push({
+    type: 'hit',
+    targetId: target.id,
+    ownerId: killerId,
+    x: target.x,
+    y: target.y,
+    damage: dmg,
+    weaponId
+  });
+  if (target.health <= 0) killEntity(state, target, killerId);
+}
+
+function detonateGrenade(state, grenade) {
+  for (const entity of state.entities) {
+    if (entity.dead || entity.id === grenade.ownerId) continue;
+    if (shouldSkipFriendlyFire(state, entity.team, grenade.team)) continue;
+    const dist = Math.max(0, distance(entity, grenade) - entity.radius * 0.9);
+    if (dist > GRENADE_BLAST_RADIUS) continue;
+    const f = 1 - clamp(dist / GRENADE_BLAST_RADIUS, 0, 1);
+    applyDirectDamage(state, entity, GRENADE_MAX_DAMAGE * f, grenade.ownerId);
+  }
+  state.events.push({ type: 'explosion', x: grenade.x, y: grenade.y, radius: GRENADE_BLAST_RADIUS });
+}
+
+function updateRarePickupSpawns(state, dt) {
+  state.rarePickupIn -= dt;
+  if (state.rarePickupIn > 0) return;
+  state.rarePickupIn = 26 + random(state) * 34;
+  const rareCount = state.pickups.filter((p) => p.type === 'grenade' || p.type === 'bandage').length;
+  if (rareCount >= 3) return;
+  const type = random(state) > 0.45 ? 'grenade' : 'bandage';
+  const spot = findOpenPickupSpot(state);
+  if (!spot) return;
+  state.pickups.push({
+    id: `pickup-${state.nextPickupId++}`,
+    type,
+    x: spot.x,
+    y: spot.y,
+    active: true,
+    respawnAt: 0
+  });
+}
+
+function findOpenPickupSpot(state) {
+  for (let attempt = 0; attempt < 28; attempt += 1) {
+    const x = 120 + random(state) * (state.map.width - 240);
+    const y = 120 + random(state) * (state.map.height - 240);
+    if (state.map.obstacles.some((rect) => circleIntersectsRect({ x, y, radius: 18 }, rect))) continue;
+    if (state.map.hazards.some((rect) => pointInRect({ x, y }, rect))) continue;
+    return { x, y };
+  }
+  return null;
+}
+
+function isWaveMode(mode) {
+  return mode === 'pve_waves' || mode === MULTIPLAYER_MODES.wave;
+}
+
+function isCaptureMode(mode) {
+  return mode === 'pve_capture' || mode === MULTIPLAYER_MODES.capture;
+}
+
+function isBotDmMode(mode) {
+  return mode === 'pvp_deathmatch' || mode === MULTIPLAYER_MODES.botDm;
+}
+
 function isPveMode(mode) {
   return mode === 'pve_elimination' || mode === MULTIPLAYER_MODES.pve;
 }
 
 function isPvpMode(mode) {
-  return mode === 'pvp_deathmatch' || mode === MULTIPLAYER_MODES.pvp;
+  return mode === MULTIPLAYER_MODES.pvp;
 }
 
 function clampNumber(value, min, max) {

@@ -1,41 +1,55 @@
 import { makeInput } from '../simulation/match.js';
+import { isDomTypingFocused } from './uiFocus.js';
 
 export class InputBindings {
   constructor(scene) {
     this.scene = scene;
-    this.keys = scene.input.keyboard.addKeys({
-      w: 'W',
-      a: 'A',
-      s: 'S',
-      d: 'D',
-      r: 'R',
-      shift: 'SHIFT',
-      one: 'ONE',
-      two: 'TWO',
-      three: 'THREE'
-    });
+    // disableCapture: do not preventDefault — allows typing WASD in HTML inputs
+    this.keys = scene.input.keyboard.addKeys(
+      {
+        w: 'W',
+        a: 'A',
+        s: 'S',
+        d: 'D',
+        r: 'R',
+        g: 'G',
+        v: 'V',
+        shift: 'SHIFT',
+        one: 'ONE',
+        two: 'TWO',
+        three: 'THREE'
+      },
+      false
+    );
     this.reloadQueued = false;
     this.swapQueued = null;
+    this.grenadeQueued = false;
+    this.bandageQueued = false;
     scene.input.keyboard.on('keydown-R', () => {
-      this.reloadQueued = true;
+      if (!isDomTypingFocused()) this.reloadQueued = true;
+    });
+    scene.input.keyboard.on('keydown-G', () => {
+      if (!isDomTypingFocused()) this.grenadeQueued = true;
+    });
+    scene.input.keyboard.on('keydown-V', () => {
+      if (!isDomTypingFocused()) this.bandageQueued = true;
     });
     scene.input.keyboard.on('keydown-ONE', () => {
-      this.swapQueued = 0;
+      if (!isDomTypingFocused()) this.swapQueued = 0;
     });
     scene.input.keyboard.on('keydown-TWO', () => {
-      this.swapQueued = 1;
+      if (!isDomTypingFocused()) this.swapQueued = 1;
     });
     scene.input.keyboard.on('keydown-THREE', () => {
-      this.swapQueued = 2;
+      if (!isDomTypingFocused()) this.swapQueued = 2;
     });
     scene.input.on('wheel', (_pointer, _gameObjects, _dx, dy) => {
-      this.swapQueued = dy > 0 ? 1 : 0;
+      if (!isDomTypingFocused()) this.swapQueued = dy > 0 ? 1 : 0;
     });
   }
 
   read(player) {
-    const activeTag = document.activeElement?.tagName;
-    if (activeTag === 'INPUT' || activeTag === 'SELECT' || activeTag === 'TEXTAREA') {
+    if (isDomTypingFocused()) {
       return makeInput({ aimX: player?.x || 0, aimY: player?.y || 0 });
     }
     const pointer = this.scene.input.activePointer;
@@ -48,11 +62,15 @@ export class InputBindings {
       fire: pointer.isDown && pointer.leftButtonDown(),
       reload: this.reloadQueued,
       swap: this.swapQueued,
-      sprint: this.keys.shift.isDown
+      sprint: this.keys.shift.isDown,
+      useGrenade: this.grenadeQueued,
+      useBandage: this.bandageQueued
     });
     if (this.swapQueued === 1 && player) input.swap = (player.activeWeaponIndex + 1) % player.weapons.length;
     this.reloadQueued = false;
     this.swapQueued = null;
+    this.grenadeQueued = false;
+    this.bandageQueued = false;
     return input;
   }
 }

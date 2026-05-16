@@ -88,6 +88,22 @@ export const WEAPONS = {
     recoil: 0.035,
     pellets: 1,
     ammoReserve: 45
+  },
+  /** Non-firing placeholder for wave zombies (melee only). */
+  zombie_claw: {
+    id: 'zombie_claw',
+    displayName: 'Infected claw',
+    role: 'Melee',
+    damage: 0,
+    fireRate: 0.01,
+    magazineSize: 1,
+    reloadTime: 99,
+    projectileSpeed: 0,
+    spread: 0,
+    range: 0,
+    recoil: 0,
+    pellets: 1,
+    ammoReserve: 0
   }
 };
 
@@ -98,7 +114,9 @@ export const LOADOUTS = [
     description: 'Balanced carbine, sidearm, and armor for flexible lanes.',
     weapons: ['mk18', 'sidearm'],
     armor: 35,
-    speedBonus: 0
+    speedBonus: 0,
+    grenades: 2,
+    bandages: 2
   },
   {
     id: 'breacher',
@@ -106,7 +124,9 @@ export const LOADOUTS = [
     description: 'Shotgun pressure kit with faster movement and low reserves.',
     weapons: ['breacher', 'sidearm'],
     armor: 20,
-    speedBonus: 18
+    speedBonus: 18,
+    grenades: 3,
+    bandages: 1
   },
   {
     id: 'recon',
@@ -114,7 +134,9 @@ export const LOADOUTS = [
     description: 'Marksman rifle, lighter armor, sharper radar discipline.',
     weapons: ['marksman', 'sidearm'],
     armor: 15,
-    speedBonus: 12
+    speedBonus: 12,
+    grenades: 1,
+    bandages: 2
   },
   {
     id: 'support',
@@ -122,7 +144,9 @@ export const LOADOUTS = [
     description: 'LMG, strong armor, and suppressive fire at lower mobility.',
     weapons: ['lmg', 'sidearm'],
     armor: 50,
-    speedBonus: -12
+    speedBonus: -12,
+    grenades: 2,
+    bandages: 3
   }
 ];
 
@@ -134,7 +158,17 @@ export const MODES = [
   },
   {
     id: 'pvp_deathmatch',
-    name: 'Bot Deathmatch',
+    name: 'Bot Deathmatch (Offline)',
     description: 'Score the most eliminations before the clock expires. Bots respawn and hunt each other.'
+  },
+  {
+    id: 'pve_waves',
+    name: 'Survival Waves',
+    description: 'Waves of bots ramp up in strength and numbers. Highest kill score wins when time expires.'
+  },
+  {
+    id: 'pve_capture',
+    name: 'Territory Control',
+    description: 'Hold capture zones to bank team score. Play solo with AI allies and enemies or online.'
   }
 ];

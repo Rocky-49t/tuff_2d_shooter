@@ -56,6 +56,11 @@ const game = new Phaser.Game({
   width: window.innerWidth,
   height: window.innerHeight,
   backgroundColor: '#101312',
+  input: {
+    keyboard: {
+      capture: []
+    }
+  },
   scale: {
     mode: Phaser.Scale.RESIZE,
     parent: 'game-host',

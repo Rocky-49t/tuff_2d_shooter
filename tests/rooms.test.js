@@ -121,6 +121,8 @@ test('settings and profile sanitizers choose safe defaults', () => {
   assert.deepEqual(sanitizeProfile({ username: '<Rogue>', color: 'red', loadoutId: 'bad' }), {
     username: 'Rogue',
     color: '#6fc6ff',
-    loadoutId: 'rifleman'
+    loadoutId: 'rifleman',
+    avatarUrl: '',
+    captureTeam: 'auto'
   });
 });

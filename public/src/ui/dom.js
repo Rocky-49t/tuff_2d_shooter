@@ -4,7 +4,10 @@ import { getActiveAmmo, getActiveWeapon, getPlayer } from '../simulation/match.j
 
 const ROOM_MODES = [
   { id: 'multiplayer_pvp', name: 'Human PvP' },
-  { id: 'multiplayer_pve', name: 'Co-op PvE' }
+  { id: 'multiplayer_pve', name: 'Co-op PvE' },
+  { id: 'multiplayer_bot_dm', name: 'Bot Deathmatch' },
+  { id: 'multiplayer_wave', name: 'Survival Waves' },
+  { id: 'multiplayer_capture', name: 'Territory Control' }
 ];
 const elements = {};
 let feedSignature = '';
@@ -22,7 +25,18 @@ export function initUI(callbacks) {
   loadProfile();
   renderLocalOptions();
 
-  elements.start.addEventListener('click', () => callbacks.onStart({ ...localSelection, playerName: getProfile().username, playerColor: getProfile().color }));
+  elements.start.addEventListener('click', () => {
+    const p = getProfile();
+    const capTeam =
+      p.captureTeam === 'bravo' ? 'bravo' : p.captureTeam === 'alpha' ? 'alpha' : null;
+    callbacks.onStart({
+      ...localSelection,
+      playerName: p.username,
+      playerColor: p.color,
+      playerAvatarUrl: p.avatarUrl || '',
+      captureTeam: capTeam
+    });
+  });
   elements.createRoom.addEventListener('click', () => callbacks.onCreateRoom({ profile: getProfile(), settings: getRoomSettings() }));
   elements.joinRoom.addEventListener('click', () => callbacks.onJoinRoom({ code: elements.roomCodeInput.value, profile: getProfile() }));
   elements.startRoom.addEventListener('click', () => currentRoom && callbacks.onStartRoom({ code: currentRoom.code }));
@@ -40,12 +54,19 @@ export function initUI(callbacks) {
     elements.chatInput.value = '';
   });
 
-  for (const input of [elements.profileName, elements.profileColor, elements.roomLoadout]) {
+  for (const input of [elements.profileName, elements.profileColor, elements.profileTeam, elements.roomLoadout]) {
     input.addEventListener('change', () => {
       saveProfile();
       callbacks.onProfileChange?.(getProfile());
     });
   }
+  elements.profileAvatar?.addEventListener('change', async (event) => {
+    const dataUrl = await fileToAvatarDataUrl(event.target.files?.[0]);
+    elements.profileAvatarDataUrl = dataUrl;
+    saveProfile();
+    callbacks.onProfileChange?.(getProfile());
+    event.target.value = '';
+  });
   for (const input of [elements.roomMode, elements.roomMap, elements.roomTime]) {
     input.addEventListener('change', () => {
       if (currentRoom && currentRoom.hostId === currentSocketId && currentRoom.status === 'lobby') {
@@ -64,7 +85,9 @@ export function getProfile() {
   return {
     username: elements.profileName.value.trim() || 'Operator',
     color: elements.profileColor.value || '#6fc6ff',
-    loadoutId: elements.roomLoadout.value || localSelection.loadoutId
+    loadoutId: elements.roomLoadout.value || localSelection.loadoutId,
+    avatarUrl: elements.profileAvatarDataUrl || '',
+    captureTeam: normalizeCaptureTeam(elements.profileTeam?.value || 'auto')
   };
 }
 
@@ -161,10 +184,31 @@ export function updateHUD(state) {
     ? `Reloading ${Math.ceil(ammo.reloadRemaining * 10) / 10}s`
     : `${ammo.mag} / ${ammo.reserve}`;
   elements.objectiveLabel.textContent = state.objective.label;
-  elements.objectiveValue.textContent = state.objective.remaining === null
-    ? 'No Limit'
-    : state.mode.includes('pvp') ? formatTime(state.objective.remaining) : `${state.objective.remaining}`;
+  const isWave = state.mode.includes('wave');
+  const isCap = state.mode.includes('capture');
+  if (isWave && state.objective.duration !== null) {
+    const t = Math.max(0, (Number(state.objective.duration) || 0) - state.time);
+    elements.objectiveValue.textContent = `W${state.wave?.completedWaves || 1} · ${formatTime(t)}`;
+  } else if (isCap && state.capture) {
+    const a = Math.round(state.capture.teamScore?.alpha || 0);
+    const b = Math.round(state.capture.teamScore?.bravo || 0);
+    const dur = Number(state.objective.duration);
+    const left =
+      state.objective.duration === null || !Number.isFinite(dur)
+        ? '∞'
+        : formatTime(Math.max(0, dur - state.time));
+    elements.objectiveValue.innerHTML = `<span style="color:#5eb0e8;font-weight:700">${a}</span> <span style="opacity:0.55">vs</span> <span style="color:#e85d5d;font-weight:700">${b}</span> · <span style="opacity:0.9">${left}</span>`;
+  } else {
+    elements.objectiveValue.textContent = state.objective.remaining === null
+      ? 'No Limit'
+      : String(state.mode).includes('pvp') || String(state.mode).includes('bot_dm') || String(state.mode).includes('deathmatch')
+        ? formatTime(state.objective.remaining)
+        : `${state.objective.remaining}`;
+  }
   elements.scoreValue.textContent = `${state.score[state.playerId]?.kills || 0}`;
+  if (elements.kitCount && player) {
+    elements.kitCount.textContent = `Nades ${player.grenades ?? 0} | Doc ${player.bandages ?? 0}`;
+  }
   updateFeed(state);
   updateMinimap(state);
   updateScoreboard(state);
@@ -197,10 +241,11 @@ function populateRoomSelects() {
 }
 
 function getRoomSettings() {
+  const rawTime = elements.roomTime.value === 'none' ? null : Number(elements.roomTime.value);
   return {
     mode: elements.roomMode.value,
     mapId: elements.roomMap.value,
-    timeLimit: elements.roomTime.value === 'none' ? null : Number(elements.roomTime.value)
+    timeLimit: rawTime === null || Number.isFinite(rawTime) ? rawTime : null
   };
 }
 
@@ -264,6 +309,20 @@ function updateMinimap(state) {
   for (const rect of state.map.obstacles) ctx.fillRect(rect.x * sx, rect.y * sy, rect.w * sx, rect.h * sy);
   ctx.fillStyle = 'rgba(240, 82, 82, 0.4)';
   for (const hazard of state.map.hazards) ctx.fillRect(hazard.x * sx, hazard.y * sy, hazard.w * sx, hazard.h * sy);
+  if (state.capture?.points) {
+    const rScale = Math.min(sx, sy);
+    for (const cp of state.capture.points) {
+      if (cp.owner === 'alpha') ctx.strokeStyle = 'rgba(94,176,232,0.75)';
+      else if (cp.owner === 'bravo') ctx.strokeStyle = 'rgba(232,93,93,0.75)';
+      else ctx.strokeStyle = 'rgba(210,216,204,0.45)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(cp.x * sx, cp.y * sy, cp.radius * rScale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
   for (const entity of state.entities) {
     if (entity.dead) continue;
     ctx.fillStyle = entity.color || (entity.id === state.playerId ? '#6fc6ff' : '#efb64a');
@@ -330,20 +389,75 @@ function loadProfile() {
     elements.profileName.value = profile.username || 'Operator';
     elements.profileColor.value = profile.color || '#6fc6ff';
     elements.roomLoadout.value = profile.loadoutId || localSelection.loadoutId;
+    if (elements.profileTeam) elements.profileTeam.value = profile.captureTeam || 'auto';
+    elements.profileAvatarDataUrl = profile.avatarUrl || '';
   } catch {
     elements.profileName.value = 'Operator';
     elements.profileColor.value = '#6fc6ff';
+    elements.profileAvatarDataUrl = '';
   }
 }
 
 function saveProfile() {
-  localStorage.setItem('tacticalShooterProfile', JSON.stringify(getProfile()));
+  const p = getProfile();
+  localStorage.setItem(
+    'tacticalShooterProfile',
+    JSON.stringify({
+      username: p.username,
+      color: p.color,
+      loadoutId: p.loadoutId,
+      captureTeam: p.captureTeam,
+      avatarUrl: p.avatarUrl
+    })
+  );
 }
 
 function formatTime(value) {
-  const seconds = Math.max(0, Math.ceil(value));
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const seconds = Math.max(0, Math.ceil(n));
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function normalizeCaptureTeam(value) {
+  if (value === 'bravo') return 'bravo';
+  if (value === 'alpha') return 'alpha';
+  return 'auto';
+}
+
+function fileToAvatarDataUrl(file) {
+  return new Promise((resolve) => {
+    if (!file || !file.type.startsWith('image/')) {
+      resolve('');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => resolve('');
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxEdge = 96;
+        const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve('');
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const url = canvas.toDataURL('image/jpeg', 0.82);
+        resolve(url.length > 110_000 ? '' : url);
+      };
+      img.onerror = () => resolve('');
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function cacheElements() {
@@ -393,4 +507,8 @@ function cacheElements() {
   elements.scoreboard = document.querySelector('#scoreboard');
   elements.resultTitle = document.querySelector('#result-title');
   elements.resultBody = document.querySelector('#result-body');
+  elements.profileTeam = document.querySelector('#profile-team');
+  elements.profileAvatar = document.querySelector('#profile-avatar');
+  elements.profileAvatarDataUrl = '';
+  elements.kitCount = document.querySelector('#kit-count');
 }
